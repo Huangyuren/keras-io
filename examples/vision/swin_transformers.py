@@ -54,14 +54,14 @@ y_test = keras.utils.to_categorical(y_test, num_classes)
 print(f"x_train shape: {x_train.shape} - y_train shape: {y_train.shape}")
 print(f"x_test shape: {x_test.shape} - y_test shape: {y_test.shape}")
 
-plt.figure(figsize=(10, 10))
-for i in range(25):
-    plt.subplot(5, 5, i + 1)
-    plt.xticks([])
-    plt.yticks([])
-    plt.grid(False)
-    plt.imshow(x_train[i])
-plt.show()
+# plt.figure(figsize=(10, 10))
+# for i in range(25):
+#     plt.subplot(5, 5, i + 1)
+#     plt.xticks([])
+#     plt.yticks([])
+#     plt.grid(False)
+#     plt.imshow(x_train[i])
+# plt.show()
 
 """
 ## Configure the hyperparameters
@@ -154,7 +154,7 @@ whereas window-based self-attention leads to linear complexity and is easily sca
 
 class WindowAttention(layers.Layer):
     def __init__(
-        self, dim, window_size, num_heads, qkv_bias=True, dropout_rate=0.0, **kwargs
+        self, dim, window_size, num_heads, qkv_bias=True, dropout_rate=0.0, name='windatten', **kwargs
     ):
         super(WindowAttention, self).__init__(**kwargs)
         self.dim = dim
@@ -170,6 +170,7 @@ class WindowAttention(layers.Layer):
             2 * self.window_size[1] - 1
         )
         self.relative_position_bias_table = self.add_weight(
+            name='windatten1',
             shape=(num_window_elements, self.num_heads),
             initializer=tf.initializers.Zeros(),
             trainable=True,
@@ -265,6 +266,7 @@ class SwinTransformer(layers.Layer):
         num_mlp=1024,
         qkv_bias=True,
         dropout_rate=0.0,
+        name='swintrans',
         **kwargs,
     ):
         super(SwinTransformer, self).__init__(**kwargs)
@@ -283,6 +285,7 @@ class SwinTransformer(layers.Layer):
             num_heads=num_heads,
             qkv_bias=qkv_bias,
             dropout_rate=dropout_rate,
+            name='windatten',
         )
         self.drop_path = DropPath(dropout_rate)
         self.norm2 = layers.LayerNormalization(epsilon=1e-5)
@@ -390,7 +393,7 @@ images on top of which we will later use the Swin Transformer class we built.
 
 
 class PatchExtract(layers.Layer):
-    def __init__(self, patch_size, **kwargs):
+    def __init__(self, patch_size, name='extract', **kwargs):
         super(PatchExtract, self).__init__(**kwargs)
         self.patch_size_x = patch_size[0]
         self.patch_size_y = patch_size[0]
@@ -410,7 +413,7 @@ class PatchExtract(layers.Layer):
 
 
 class PatchEmbedding(layers.Layer):
-    def __init__(self, num_patch, embed_dim, **kwargs):
+    def __init__(self, num_patch, embed_dim, name='embed', **kwargs):
         super(PatchEmbedding, self).__init__(**kwargs)
         self.num_patch = num_patch
         self.proj = layers.Dense(embed_dim)
@@ -422,7 +425,7 @@ class PatchEmbedding(layers.Layer):
 
 
 class PatchMerging(tf.keras.layers.Layer):
-    def __init__(self, num_patch, embed_dim):
+    def __init__(self, num_patch, embed_dim, name='merge'):
         super(PatchMerging, self).__init__()
         self.num_patch = num_patch
         self.embed_dim = embed_dim
@@ -450,8 +453,8 @@ We put together the Swin Transformer model.
 input = layers.Input(input_shape)
 x = layers.RandomCrop(image_dimension, image_dimension)(input)
 x = layers.RandomFlip("horizontal")(x)
-x = PatchExtract(patch_size)(x)
-x = PatchEmbedding(num_patch_x * num_patch_y, embed_dim)(x)
+x = PatchExtract(patch_size, name='extract1')(x)
+x = PatchEmbedding(num_patch_x * num_patch_y, embed_dim, name='embed1')(x)
 x = SwinTransformer(
     dim=embed_dim,
     num_patch=(num_patch_x, num_patch_y),
@@ -461,6 +464,7 @@ x = SwinTransformer(
     num_mlp=num_mlp,
     qkv_bias=qkv_bias,
     dropout_rate=dropout_rate,
+    name='swintrans1',
 )(x)
 x = SwinTransformer(
     dim=embed_dim,
@@ -471,8 +475,9 @@ x = SwinTransformer(
     num_mlp=num_mlp,
     qkv_bias=qkv_bias,
     dropout_rate=dropout_rate,
+    name='swintrans2',
 )(x)
-x = PatchMerging((num_patch_x, num_patch_y), embed_dim=embed_dim)(x)
+x = PatchMerging((num_patch_x, num_patch_y), embed_dim=embed_dim, name='merge1')(x)
 x = layers.GlobalAveragePooling1D()(x)
 output = layers.Dense(num_classes, activation="softmax")(x)
 
@@ -485,6 +490,15 @@ In practice, you should train for 150 epochs to reach convergence.
 """
 
 model = keras.Model(input, output)
+
+checkpoint_filepath = "./swinTransformerCPs/checkpoint"
+checkpoint_callback = keras.callbacks.ModelCheckpoint(
+    checkpoint_filepath,
+    monitor="val_accuracy",
+    save_best_only=True,
+    save_weights_only=True,
+)
+
 model.compile(
     loss=keras.losses.CategoricalCrossentropy(label_smoothing=label_smoothing),
     optimizer=tfa.optimizers.AdamW(
@@ -497,11 +511,12 @@ model.compile(
 )
 
 history = model.fit(
-    x_train,
-    y_train,
+    x=x_train,
+    y=y_train,
     batch_size=batch_size,
     epochs=num_epochs,
     validation_split=validation_split,
+    callbacks=[checkpoint_callback],
 )
 
 """

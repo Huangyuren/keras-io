@@ -55,7 +55,8 @@ from tensorflow.keras import layers
 
 # Setting seed for reproducibiltiy
 SEED = 42
-keras.utils.set_random_seed(SEED)
+# keras.utils.set_random_seed(SEED)
+tf.random.set_seed(SEED)
 
 """
 ## Prepare the data
@@ -64,10 +65,11 @@ keras.utils.set_random_seed(SEED)
 NUM_CLASSES = 100
 INPUT_SHAPE = (32, 32, 3)
 
-(x_train, y_train), (x_test, y_test) = keras.datasets.cifar100.load_data()
+(cifar100_x_train, cifar100_y_train), (_, _) = keras.datasets.cifar100.load_data()
+(mnist_x_train, mnist_y_train), (mnist_x_test, mnist_y_test) = keras.datasets.fashion_mnist.load_data()
 
-print(f"x_train shape: {x_train.shape} - y_train shape: {y_train.shape}")
-print(f"x_test shape: {x_test.shape} - y_test shape: {y_test.shape}")
+print(f"cifar100_x_train shape: {cifar100_x_train.shape} - cifar100_y_train shape: {cifar100_y_train.shape}")
+print(f"mnist_x_test shape: {mnist_x_test.shape} - mnist_y_test shape: {mnist_y_test.shape}")
 
 """
 ## Configure the hyperparameters
@@ -78,7 +80,8 @@ the hyperparameters yourself.
 
 # DATA
 BUFFER_SIZE = 512
-BATCH_SIZE = 256
+# BATCH_SIZE = 256
+BATCH_SIZE = 8
 
 # AUGMENTATION
 IMAGE_SIZE = 72
@@ -90,7 +93,7 @@ LEARNING_RATE = 0.001
 WEIGHT_DECAY = 0.0001
 
 # TRAINING
-EPOCHS = 50
+EPOCHS = 1
 
 # ARCHITECTURE
 LAYER_NORM_EPS = 1e-6
@@ -118,18 +121,18 @@ don't use the mentioned data augmentation schemes. Please feel
 free to add to or remove from the augmentation pipeline.
 """
 
-data_augmentation = keras.Sequential(
-    [
-        layers.Normalization(),
-        layers.Resizing(IMAGE_SIZE, IMAGE_SIZE),
-        layers.RandomFlip("horizontal"),
-        layers.RandomRotation(factor=0.02),
-        layers.RandomZoom(height_factor=0.2, width_factor=0.2),
-    ],
-    name="data_augmentation",
-)
-# Compute the mean and the variance of the training data for normalization.
-data_augmentation.layers[0].adapt(x_train)
+# data_augmentation = keras.Sequential(
+#     [
+#         layers.Normalization(),
+#         layers.Resizing(IMAGE_SIZE, IMAGE_SIZE),
+#         layers.RandomFlip("horizontal"),
+#         layers.RandomRotation(factor=0.02),
+#         layers.RandomZoom(height_factor=0.2, width_factor=0.2),
+#     ],
+#     name="data_augmentation",
+# )
+# # Compute the mean and the variance of the training data for normalization.
+# data_augmentation.layers[0].adapt(cifar100_x_train)
 
 """
 ## Implement Shifted Patch Tokenization
@@ -162,7 +165,6 @@ class ShiftedPatchTokenization(layers.Layer):
         vanilla=False,
         **kwargs,
     ):
-        super().__init__(**kwargs)
         self.vanilla = vanilla  # Flag to swtich to vanilla patch extractor
         self.image_size = image_size
         self.patch_size = patch_size
@@ -170,6 +172,20 @@ class ShiftedPatchTokenization(layers.Layer):
         self.flatten_patches = layers.Reshape((num_patches, -1))
         self.projection = layers.Dense(units=projection_dim)
         self.layer_norm = layers.LayerNormalization(epsilon=LAYER_NORM_EPS)
+        super(ShiftedPatchTokenization, self).__init__(**kwargs)
+
+    def get_config(self):
+        config = super(ShiftedPatchTokenization, self).get_config()
+        config.update({
+            'vanilla': self.vanilla,
+            'image_size': self.image_size,
+            'patch_size': self.patch_size,
+            'half_patch': self.half_patch,
+            'flat_patches': self.flatten_patches,
+            'projection': self.projection,
+            'layer_norm': self.layer_norm,
+        })
+        return config
 
     def crop_shift_pad(self, images, mode):
         # Build the diagonally shifted images
@@ -246,10 +262,10 @@ class ShiftedPatchTokenization(layers.Layer):
 """
 ### Visualize the patches
 """
-
+"""
 # Get a random image from the training dataset
 # and resize the image
-image = x_train[np.random.choice(range(x_train.shape[0]))]
+image = cifar100_x_train[np.random.choice(range(cifar100_x_train.shape[0]))]
 resized_image = tf.image.resize(
     tf.convert_to_tensor([image]), size=(IMAGE_SIZE, IMAGE_SIZE)
 )
@@ -288,6 +304,7 @@ for index, name in enumerate(shifted_images):
             plt.imshow(image[..., 3 * index : 3 * index + 3])
             plt.axis("off")
     plt.show()
+"""
 
 """
 ## Implement the patch encoding layer
@@ -307,6 +324,15 @@ class PatchEncoder(layers.Layer):
             input_dim=num_patches, output_dim=projection_dim
         )
         self.positions = tf.range(start=0, limit=self.num_patches, delta=1)
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({
+            'num_patches': self.num_patches,
+            'position_embedding': self.position_embedding,
+            'positions': self.positions.numpy(),
+        })
+        return config
 
     def call(self, encoded_patches):
         encoded_positions = self.position_embedding(self.positions)
@@ -360,6 +386,13 @@ class MultiHeadAttentionLSA(tf.keras.layers.MultiHeadAttention):
         # the square root of the key dimension.
         self.tau = tf.Variable(math.sqrt(float(self._key_dim)), trainable=True)
 
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({
+            'tau': self.tau.numpy(),
+        })
+        return config
+
     def _compute_attention(self, query, key, value, attention_mask=None, training=None):
         query = tf.multiply(query, 1.0 / self.tau)
         attention_scores = tf.einsum(self._dot_product_equation, key, query)
@@ -395,7 +428,23 @@ diag_attn_mask = tf.cast([diag_attn_mask], dtype=tf.int8)
 
 
 def create_vit_classifier(vanilla=False):
-    inputs = layers.Input(shape=INPUT_SHAPE)
+
+    data_augmentation = keras.Sequential(
+        [
+            layers.Normalization(),
+            layers.Resizing(IMAGE_SIZE, IMAGE_SIZE),
+            layers.RandomFlip("horizontal"),
+            layers.RandomRotation(factor=0.02),
+            layers.RandomZoom(height_factor=0.2, width_factor=0.2),
+        ],
+        name="data_augmentation",
+    )
+    # Compute the mean and the variance of the training data for normalization.
+    data_augmentation.layers[0].adapt(cifar100_x_train)
+
+
+    dim = np.array(INPUT_SHAPE)
+    inputs = layers.Input(shape=dim)
     # Augment data.
     augmented = data_augmentation(inputs)
     # Create patches.
@@ -434,9 +483,67 @@ def create_vit_classifier(vanilla=False):
     # Classify outputs.
     logits = layers.Dense(NUM_CLASSES)(features)
     # Create the Keras model.
-    model = keras.Model(inputs=inputs, outputs=logits)
+    model = tf.keras.Model(inputs, logits)
     return model
 
+def create_vit_test(vanilla=False):
+
+    data_augmentation_test = keras.Sequential(
+        [
+            layers.Normalization(),
+            layers.Resizing(IMAGE_SIZE, IMAGE_SIZE),
+            layers.RandomFlip("horizontal"),
+            layers.RandomRotation(factor=0.02),
+            layers.RandomZoom(height_factor=0.2, width_factor=0.2),
+        ],
+        name="data_augmentation_test",
+    )
+    # Compute the mean and the variance of the training data for normalization.
+    data_augmentation_test.layers[0].adapt(mnist_x_test)
+
+    input_shape_new = (28, 28, 1)
+    dim = np.array(input_shape_new)
+    inputs = layers.Input(shape=dim)
+    # Augment data.
+    augmented = data_augmentation_test(inputs)
+    # Create patches.
+    (tokens, _) = ShiftedPatchTokenization(vanilla=vanilla)(augmented)
+    # Encode patches.
+    encoded_patches = PatchEncoder()(tokens)
+
+    # Create multiple layers of the Transformer block.
+    for _ in range(TRANSFORMER_LAYERS):
+        # Layer normalization 1.
+        x1 = layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
+        # Create a multi-head attention layer.
+        if not vanilla:
+            attention_output = MultiHeadAttentionLSA(
+                num_heads=NUM_HEADS, key_dim=PROJECTION_DIM, dropout=0.1
+            )(x1, x1, attention_mask=diag_attn_mask)
+        else:
+            attention_output = layers.MultiHeadAttention(
+                num_heads=NUM_HEADS, key_dim=PROJECTION_DIM, dropout=0.1
+            )(x1, x1)
+        # Skip connection 1.
+        x2 = layers.Add()([attention_output, encoded_patches])
+        # Layer normalization 2.
+        x3 = layers.LayerNormalization(epsilon=1e-6)(x2)
+        # MLP.
+        x3 = mlp(x3, hidden_units=TRANSFORMER_UNITS, dropout_rate=0.1)
+        # Skip connection 2.
+        encoded_patches = layers.Add()([x3, x2])
+
+    # Create a [batch_size, projection_dim] tensor.
+    representation = layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
+    representation = layers.Flatten()(representation)
+    representation = layers.Dropout(0.5)(representation)
+    # Add MLP.
+    features = mlp(representation, hidden_units=MLP_HEAD_UNITS, dropout_rate=0.5)
+    # Classify outputs.
+    logits = layers.Dense(NUM_CLASSES)(features)
+    # Create the Keras model.
+    model = tf.keras.Model(inputs, logits)
+    return model
 
 """
 ## Compile, train, and evaluate the mode
@@ -484,9 +591,10 @@ class WarmUpCosine(keras.optimizers.schedules.LearningRateSchedule):
             step > self.total_steps, 0.0, learning_rate, name="learning_rate"
         )
 
+def run_experiment(model, isTrain):
+    model_in_test = create_vit_test(vanilla=True)
 
-def run_experiment(model):
-    total_steps = int((len(x_train) / BATCH_SIZE) * EPOCHS)
+    total_steps = int((len(cifar100_x_train) / BATCH_SIZE) * EPOCHS)
     warmup_epoch_percentage = 0.10
     warmup_steps = int(total_steps * warmup_epoch_percentage)
     scheduled_lrs = WarmUpCosine(
@@ -500,6 +608,15 @@ def run_experiment(model):
         learning_rate=LEARNING_RATE, weight_decay=WEIGHT_DECAY
     )
 
+    checkpoint_filepath = "./vitCheckPoints/checkpoint"
+    # hdf5_filename = "my_h5_model.h5"
+    checkpoint_callback = keras.callbacks.ModelCheckpoint(
+        checkpoint_filepath,
+        monitor="val_accuracy",
+        save_best_only=True,
+        save_weights_only=True,
+    )
+
     model.compile(
         optimizer=optimizer,
         loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
@@ -509,14 +626,44 @@ def run_experiment(model):
         ],
     )
 
-    history = model.fit(
-        x=x_train,
-        y=y_train,
-        batch_size=BATCH_SIZE,
-        epochs=EPOCHS,
-        validation_split=0.1,
+    model_in_test.compile(
+        optimizer=optimizer,
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        metrics=[
+            keras.metrics.SparseCategoricalAccuracy(name="accuracy"),
+            keras.metrics.SparseTopKCategoricalAccuracy(5, name="top-5-accuracy"),
+        ],
     )
-    _, accuracy, top_5_accuracy = model.evaluate(x_test, y_test, batch_size=BATCH_SIZE)
+
+    if isTrain:
+        history = model.fit(
+            x=cifar100_x_train,
+            y=cifar100_y_train,
+            batch_size=BATCH_SIZE,
+            epochs=EPOCHS,
+            validation_split=0.1,
+            callbacks=[checkpoint_callback],
+        )
+        # model.save(checkpoint_filepath + hdf5_filename)
+
+
+    model.load_weights(checkpoint_filepath)
+
+    for layer_new, layer_old in zip(model_in_test.layers[6:], model.layers[6:]):
+        layer_new.set_weights(layer_old.get_weights())
+
+    history = model_in_test.fit(
+            x=mnist_x_train,
+            y=mnist_y_train,
+            batch_size=BATCH_SIZE,
+            epochs=EPOCHS,
+            validation_split=0.1,
+            callbacks=[checkpoint_callback],
+        )
+    # reconstructed_model = tf.keras.models.load_model(checkpoint_filepath + hdf5_filename, custom_objects={'ShiftedPatchTokenization': ShiftedPatchTokenization, 'PatchEncoder': PatchEncoder})
+
+    # model_in_test.summary()
+    _, accuracy, top_5_accuracy = model_in_test.evaluate(mnist_x_test, mnist_y_test, batch_size=BATCH_SIZE)
     print(f"Test accuracy: {round(accuracy * 100, 2)}%")
     print(f"Test top 5 accuracy: {round(top_5_accuracy * 100, 2)}%")
 
@@ -525,12 +672,12 @@ def run_experiment(model):
 
 # Run experiments with the vanilla ViT
 vit = create_vit_classifier(vanilla=True)
-history = run_experiment(vit)
+history = run_experiment(vit, False)
 
 # Run experiments with the Shifted Patch Tokenization and
 # Locality Self Attention modified ViT
-vit_sl = create_vit_classifier(vanilla=False)
-history = run_experiment(vit_sl)
+# vit_sl = create_vit_classifier(vanilla=False)
+# history = run_experiment(vit_sl)
 
 """
 # Final Notes
