@@ -65,7 +65,7 @@ tf.random.set_seed(SEED)
 NUM_CLASSES = 100
 INPUT_SHAPE = (32, 32, 3)
 
-(cifar100_x_train, cifar100_y_train), (_, _) = keras.datasets.cifar100.load_data()
+(cifar100_x_train, cifar100_y_train), (cifar100_x_test, cifar100_y_test) = keras.datasets.cifar100.load_data()
 (mnist_x_train, mnist_y_train), (mnist_x_test, mnist_y_test) = keras.datasets.fashion_mnist.load_data()
 
 print(f"cifar100_x_train shape: {cifar100_x_train.shape} - cifar100_y_train shape: {cifar100_y_train.shape}")
@@ -426,67 +426,7 @@ diag_attn_mask = tf.cast([diag_attn_mask], dtype=tf.int8)
 ## Build the ViT
 """
 
-
-def create_vit_classifier(vanilla=False):
-
-    data_augmentation = keras.Sequential(
-        [
-            layers.Normalization(),
-            layers.Resizing(IMAGE_SIZE, IMAGE_SIZE),
-            layers.RandomFlip("horizontal"),
-            layers.RandomRotation(factor=0.02),
-            layers.RandomZoom(height_factor=0.2, width_factor=0.2),
-        ],
-        name="data_augmentation",
-    )
-    # Compute the mean and the variance of the training data for normalization.
-    data_augmentation.layers[0].adapt(cifar100_x_train)
-
-
-    dim = np.array(INPUT_SHAPE)
-    inputs = layers.Input(shape=dim)
-    # Augment data.
-    augmented = data_augmentation(inputs)
-    # Create patches.
-    (tokens, _) = ShiftedPatchTokenization(vanilla=vanilla)(augmented)
-    # Encode patches.
-    encoded_patches = PatchEncoder()(tokens)
-
-    # Create multiple layers of the Transformer block.
-    for _ in range(TRANSFORMER_LAYERS):
-        # Layer normalization 1.
-        x1 = layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
-        # Create a multi-head attention layer.
-        if not vanilla:
-            attention_output = MultiHeadAttentionLSA(
-                num_heads=NUM_HEADS, key_dim=PROJECTION_DIM, dropout=0.1
-            )(x1, x1, attention_mask=diag_attn_mask)
-        else:
-            attention_output = layers.MultiHeadAttention(
-                num_heads=NUM_HEADS, key_dim=PROJECTION_DIM, dropout=0.1
-            )(x1, x1)
-        # Skip connection 1.
-        x2 = layers.Add()([attention_output, encoded_patches])
-        # Layer normalization 2.
-        x3 = layers.LayerNormalization(epsilon=1e-6)(x2)
-        # MLP.
-        x3 = mlp(x3, hidden_units=TRANSFORMER_UNITS, dropout_rate=0.1)
-        # Skip connection 2.
-        encoded_patches = layers.Add()([x3, x2])
-
-    # Create a [batch_size, projection_dim] tensor.
-    representation = layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
-    representation = layers.Flatten()(representation)
-    representation = layers.Dropout(0.5)(representation)
-    # Add MLP.
-    features = mlp(representation, hidden_units=MLP_HEAD_UNITS, dropout_rate=0.5)
-    # Classify outputs.
-    logits = layers.Dense(NUM_CLASSES)(features)
-    # Create the Keras model.
-    model = tf.keras.Model(inputs, logits)
-    return model
-
-def create_vit_test(vanilla=False):
+def create_vit_test(vanilla=False, testDataset=None):
 
     data_augmentation_test = keras.Sequential(
         [
@@ -499,10 +439,9 @@ def create_vit_test(vanilla=False):
         name="data_augmentation_test",
     )
     # Compute the mean and the variance of the training data for normalization.
-    data_augmentation_test.layers[0].adapt(mnist_x_test)
+    data_augmentation_test.layers[0].adapt(testDataset)
 
-    input_shape_new = (28, 28, 1)
-    dim = np.array(input_shape_new)
+    dim = np.array(INPUT_SHAPE)
     inputs = layers.Input(shape=dim)
     # Augment data.
     augmented = data_augmentation_test(inputs)
@@ -591,7 +530,7 @@ class WarmUpCosine(keras.optimizers.schedules.LearningRateSchedule):
             step > self.total_steps, 0.0, learning_rate, name="learning_rate"
         )
 
-def run_experiment(model, isMainModelTrain, isTransferLearn):
+def run_experiment(isMainModelTrain):
     total_steps = int((len(cifar100_x_train) / BATCH_SIZE) * EPOCHS)
     warmup_epoch_percentage = 0.10
     warmup_steps = int(total_steps * warmup_epoch_percentage)
@@ -615,16 +554,16 @@ def run_experiment(model, isMainModelTrain, isTransferLearn):
         save_weights_only=True,
     )
 
-    model.compile(
-        optimizer=optimizer,
-        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-        metrics=[
-            keras.metrics.SparseCategoricalAccuracy(name="accuracy"),
-            keras.metrics.SparseTopKCategoricalAccuracy(5, name="top-5-accuracy"),
-        ],
-    )
-
     if isMainModelTrain:
+        model = create_vit_test(vanilla=True, testDataset=cifar100_x_train)
+        model.compile(
+            optimizer=optimizer,
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+            metrics=[
+                keras.metrics.SparseCategoricalAccuracy(name="accuracy"),
+                keras.metrics.SparseTopKCategoricalAccuracy(5, name="top-5-accuracy"),
+            ],
+        )
         history = model.fit(
             x=cifar100_x_train,
             y=cifar100_y_train,
@@ -635,11 +574,8 @@ def run_experiment(model, isMainModelTrain, isTransferLearn):
         )
         return history
 
-    # Preparing the main model
-    model.load_weights(checkpoint_filepath)
-
     # Start building the test model
-    model_in_test = create_vit_test(vanilla=True)
+    model_in_test = create_vit_test(vanilla=True, testDataset=cifar100_x_test)
     model_in_test.compile(
         optimizer=optimizer,
         loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
@@ -648,34 +584,21 @@ def run_experiment(model, isMainModelTrain, isTransferLearn):
             keras.metrics.SparseTopKCategoricalAccuracy(5, name="top-5-accuracy"),
         ],
     )
+    model_in_test.load_weights(checkpoint_filepath)
 
-    # Now both the main and test models are ready, start transferring weights
-    for layer_new, layer_old in zip(model_in_test.layers[6:], model.layers[6:]):
-        layer_new.set_weights(layer_old.get_weights())
-
-    history = None
     # If we would like to do transfer learning on another dataset, enable this condition
-    if isTransferLearn:
-        history = model_in_test.fit(
-            x=mnist_x_train,
-            y=mnist_y_train,
-            batch_size=BATCH_SIZE,
-            epochs=EPOCHS,
-            validation_split=0.1,
-            callbacks=[checkpoint_callback],
-        )
 
     # Do testing on the testing dataset
-    _, accuracy, top_5_accuracy = model_in_test.evaluate(mnist_x_test, mnist_y_test, batch_size=BATCH_SIZE)
+    _, accuracy, top_5_accuracy = model_in_test.evaluate(cifar100_x_test, cifar100_y_test, batch_size=BATCH_SIZE)
     print(f"Test accuracy: {round(accuracy * 100, 2)}%")
     print(f"Test top 5 accuracy: {round(top_5_accuracy * 100, 2)}%")
 
-    return history
+    return None
 
 
 # Run experiments with the vanilla ViT
-vit = create_vit_classifier(vanilla=True)
-history = run_experiment(vit, False, False)
+# vit = create_vit_classifier(vanilla=True)
+history = run_experiment(True)
 
 # Run experiments with the Shifted Patch Tokenization and
 # Locality Self Attention modified ViT
