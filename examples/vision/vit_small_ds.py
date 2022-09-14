@@ -591,9 +591,7 @@ class WarmUpCosine(keras.optimizers.schedules.LearningRateSchedule):
             step > self.total_steps, 0.0, learning_rate, name="learning_rate"
         )
 
-def run_experiment(model, isTrain):
-    model_in_test = create_vit_test(vanilla=True)
-
+def run_experiment(model, isMainModelTrain, isTransferLearn):
     total_steps = int((len(cifar100_x_train) / BATCH_SIZE) * EPOCHS)
     warmup_epoch_percentage = 0.10
     warmup_steps = int(total_steps * warmup_epoch_percentage)
@@ -608,8 +606,8 @@ def run_experiment(model, isTrain):
         learning_rate=LEARNING_RATE, weight_decay=WEIGHT_DECAY
     )
 
-    checkpoint_filepath = "./vitCheckPoints/checkpoint"
-    # hdf5_filename = "my_h5_model.h5"
+    checkpoint_filepath = "./vitCheckPoints/"
+
     checkpoint_callback = keras.callbacks.ModelCheckpoint(
         checkpoint_filepath,
         monitor="val_accuracy",
@@ -626,6 +624,22 @@ def run_experiment(model, isTrain):
         ],
     )
 
+    if isMainModelTrain:
+        history = model.fit(
+            x=cifar100_x_train,
+            y=cifar100_y_train,
+            batch_size=BATCH_SIZE,
+            epochs=EPOCHS,
+            validation_split=0.1,
+            callbacks=[checkpoint_callback],
+        )
+        return history
+
+    # Preparing the main model
+    model.load_weights(checkpoint_filepath)
+
+    # Start building the test model
+    model_in_test = create_vit_test(vanilla=True)
     model_in_test.compile(
         optimizer=optimizer,
         loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
@@ -635,24 +649,14 @@ def run_experiment(model, isTrain):
         ],
     )
 
-    if isTrain:
-        history = model.fit(
-            x=cifar100_x_train,
-            y=cifar100_y_train,
-            batch_size=BATCH_SIZE,
-            epochs=EPOCHS,
-            validation_split=0.1,
-            callbacks=[checkpoint_callback],
-        )
-        # model.save(checkpoint_filepath + hdf5_filename)
-
-
-    model.load_weights(checkpoint_filepath)
-
+    # Now both the main and test models are ready, start transferring weights
     for layer_new, layer_old in zip(model_in_test.layers[6:], model.layers[6:]):
         layer_new.set_weights(layer_old.get_weights())
 
-    history = model_in_test.fit(
+    history = None
+    # If we would like to do transfer learning on another dataset, enable this condition
+    if isTransferLearn:
+        history = model_in_test.fit(
             x=mnist_x_train,
             y=mnist_y_train,
             batch_size=BATCH_SIZE,
@@ -660,9 +664,8 @@ def run_experiment(model, isTrain):
             validation_split=0.1,
             callbacks=[checkpoint_callback],
         )
-    # reconstructed_model = tf.keras.models.load_model(checkpoint_filepath + hdf5_filename, custom_objects={'ShiftedPatchTokenization': ShiftedPatchTokenization, 'PatchEncoder': PatchEncoder})
 
-    # model_in_test.summary()
+    # Do testing on the testing dataset
     _, accuracy, top_5_accuracy = model_in_test.evaluate(mnist_x_test, mnist_y_test, batch_size=BATCH_SIZE)
     print(f"Test accuracy: {round(accuracy * 100, 2)}%")
     print(f"Test top 5 accuracy: {round(top_5_accuracy * 100, 2)}%")
@@ -672,7 +675,7 @@ def run_experiment(model, isTrain):
 
 # Run experiments with the vanilla ViT
 vit = create_vit_classifier(vanilla=True)
-history = run_experiment(vit, False)
+history = run_experiment(vit, False, False)
 
 # Run experiments with the Shifted Patch Tokenization and
 # Locality Self Attention modified ViT
